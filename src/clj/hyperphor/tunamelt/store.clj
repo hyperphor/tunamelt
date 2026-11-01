@@ -13,4 +13,6 @@
   (delete* [store k]
     "Delete k and its history. Returns true if something was deleted.")
   (history* [store k]
-    "Return revisions of k, newest first, as {:key :obj :meta}."))
+    "Return revisions of k, newest first, as {:key :obj :meta}.")
+  (types* [store realm]
+    "Return {type count} for all stored types, optionally limited to realm."))

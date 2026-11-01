@@ -18,6 +18,8 @@ URIs. A drawer for data, like Multitool is a drawer for functions. See `design/d
 (t/history "hyperphor://okc/prompt/summarize")
 (t/put-many [[uri obj] ...])                          ; one transaction, for bulk loads
 (t/delete uri)
+(t/types)                                             ; => ("dialog" "log" "prompt")
+(t/types {:counts? true :realm "okc"})                ; => {"log" 12, "prompt" 3}
 ```
 
 ## Semantics

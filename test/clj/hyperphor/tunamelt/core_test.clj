@@ -113,3 +113,14 @@
     (t/put u {:at #inst "2026-10-31T00:00:00.000-00:00"})
     (is (string? (:at (t/get u)))))
   (is (thrown? clojure.lang.ExceptionInfo (t/put "http://x/log/1" {}))))
+
+(deftest types-test
+  (is (empty? (t/types)))
+  (t/put "hyperphor://okc/log/a" {})
+  (t/put "hyperphor://okc/log/b" {})
+  (t/put "hyperphor://ammdi/log/c" {})
+  (t/put "hyperphor://ammdi/block/d" {})
+  (is (= ["block" "log"] (t/types)))
+  (is (= {"block" 1 "log" 3} (t/types {:counts? true})))
+  (is (= ["log"] (t/types {:realm "okc"})))
+  (is (= {"block" 1 "log" 1} (t/types {:realm "ammdi" :counts? true}))))

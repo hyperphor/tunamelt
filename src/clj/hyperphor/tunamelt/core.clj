@@ -72,3 +72,11 @@
   "Revisions of uri, newest first (a single entry for :mutable objects)."
   [uri]
   (store/history* (the-store) (uri/parse-uri uri)))
+
+(defn types
+  "Sorted seq of stored type names, or a sorted {type count} map if :counts? is true.
+  opts: :realm limits to one realm."
+  ([] (types {}))
+  ([{:keys [realm counts?]}]
+   (let [m (store/types* (the-store) realm)]
+     (if counts? m (keys m)))))

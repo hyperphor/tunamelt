@@ -144,7 +144,15 @@
                                         ORDER BY rev DESC"]
                                       (key-params k))
                              rs-opts))
-        [(row->entry current)]))))
+        [(row->entry current)])))
+
+  (types* [_ realm]
+    (into (sorted-map)
+          (map (juxt :type :n))
+          (jdbc/execute! ds (if realm
+                              ["SELECT type, COUNT(*) AS n FROM objects WHERE realm=? GROUP BY type" realm]
+                              ["SELECT type, COUNT(*) AS n FROM objects GROUP BY type"])
+                         rs-opts))))
 
 (defn open
   "Open (creating if needed) a SQLite store at file path."

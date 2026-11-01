@@ -58,7 +58,8 @@
 
 (defn find
   "Seq of {:uri :obj :meta} of type, newest first.
-  opts: :realm, :since/:until (inst or epoch ms), :attrs {k scalar}, :limit."
+  opts: :realm, :since/:until (inst or epoch ms), :limit, :attrs {k v} where v is a scalar
+  (matches any value), a vector (must contain all), or nil (attr absent)."
   ([type] (find type {}))
   ([type opts]
    (store/find* (the-store) (name type) opts)))

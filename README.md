@@ -29,12 +29,26 @@ URIs. A drawer for data, like Multitool is a drawer for functions. See `design/d
 - **JSON round-trip**: keys come back as keywords (namespaces kept, e.g. `:block/uuid`);
   keyword and `#inst` values come back as strings.
 - **find** filters by type, plus optional realm, time range (`:since`/`:until` on last
-  update), and top-level scalar attribute equality. Newest first.
+  update), and top-level attribute equality via `:attrs`. Newest first.
+  - A scalar matches if any of the object's values for that attribute equals it, so
+    array-valued attributes are multi-valued: `{:tags "a"}` matches `{:tags ["a" "b"]}`.
+  - A vector must all be present: `{:tags ["a" "b"]}`.
+  - `nil` matches objects without that attribute.
+  - Values are compared as `get` returns them, so `:done`, `"done"`, an `#inst` and its
+    ISO string all match.
+
+## Attribute index
+
+`get` reads the object's JSON, which is the source of truth. Every `put` also rebuilds
+the object's rows in an `attrs` table (`attr`, `v_text` / `v_num` / `v_bool`): one row
+per top-level scalar, or per element of a top-level array of scalars. Nested maps and
+arrays of maps aren't indexed. For `:append-only` objects the index reflects the latest
+revision. Databases created before the index existed are backfilled on open.
 
 ## Backends
 
 | Backend | type/realm/time filters | `:attrs` filter |
 |---|---|---|
-| SQLite (default) | indexed | `json_extract` scan within the type |
+| SQLite (default) | indexed | indexed (`attrs` table) |
 
 The `hyperphor.tunamelt.store/Store` protocol is the extension point for other backends.

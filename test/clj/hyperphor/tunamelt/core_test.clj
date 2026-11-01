@@ -1,13 +1,17 @@
 (ns hyperphor.tunamelt.core-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [next.jdbc :as jdbc]
             [hyperphor.tunamelt.core :as t]
+            [hyperphor.tunamelt.sqlite :as sqlite]
             [hyperphor.tunamelt.uri :as uri]))
+
+(def ^:dynamic *db-file* nil)
 
 (defn- temp-db-fixture [f]
   (let [file (java.io.File/createTempFile "tunamelt-test" ".db")]
     (try
       (t/configure! {:store (str file) :realm "test"})
-      (f)
+      (binding [*db-file* (str file)] (f))
       (finally
         (doseq [suffix ["" "-wal" "-shm"]]
           (.delete (java.io.File. (str file suffix))))))))
@@ -80,7 +84,8 @@
     (is (= #{"a" "c"} (set (map (comp :id :meta) (t/find "log" {:attrs {:ok true}})))))
     (is (= #{"b"} (set (map (comp :id :meta) (t/find "log" {:attrs {:ok false :n 2}})))))
     (is (= 1 (count (t/find "log" {:limit 1}))))
-    (is (thrown? clojure.lang.ExceptionInfo (t/find "log" {:attrs {:n [1]}})))))
+    (is (= #{"a"} (set (map (comp :id :meta) (t/find "log" {:attrs {:n [1]}})))))
+    (is (thrown? clojure.lang.ExceptionInfo (t/find "log" {:attrs {:n {:x 1}}})))))
 
 (deftest logseq-scale-test
   (let [n 5000
@@ -124,3 +129,60 @@
   (is (= {"block" 1 "log" 3} (t/types {:counts? true})))
   (is (= ["log"] (t/types {:realm "okc"})))
   (is (= {"block" 1 "log" 1} (t/types {:realm "ammdi" :counts? true}))))
+
+(defn- ids [type opts] (set (map (comp :id :meta) (t/find type opts))))
+
+(deftest multi-valued-attrs-test
+  (t/put "hyperphor://okc/post/1" {:tags ["a" "b"] :n [1 2]})
+  (t/put "hyperphor://okc/post/2" {:tags ["b" "c"]})
+  (t/put "hyperphor://okc/post/3" {:tags "a"})
+  (is (= #{"1" "3"} (ids "post" {:attrs {:tags "a"}})) "scalar matches any element")
+  (is (= #{"1" "2"} (ids "post" {:attrs {:tags "b"}})))
+  (is (= #{"1"} (ids "post" {:attrs {:tags ["a" "b"]}})) "vector = contains all")
+  (is (= #{"1"} (ids "post" {:attrs {:n 2.0}})) "numeric equality across int/float")
+  (is (= #{"2" "3"} (ids "post" {:attrs {:n nil}})) "nil = attr absent")
+  (is (= ["a" "b"] (:tags (t/get "hyperphor://okc/post/1"))) "array order preserved in get"))
+
+(deftest reindex-on-put-and-delete-test
+  (let [u "hyperphor://okc/post/x"]
+    (t/put u {:tag "a"})
+    (is (= #{"x"} (ids "post" {:attrs {:tag "a"}})))
+    (t/put u {:tag "b"})
+    (is (empty? (ids "post" {:attrs {:tag "a"}})) "no stale match")
+    (is (= #{"x"} (ids "post" {:attrs {:tag "b"}})))
+    (t/delete u)
+    (is (zero? (:n (jdbc/execute-one! (jdbc/get-datasource {:dbtype "sqlite" :dbname *db-file*})
+                                      ["SELECT COUNT(*) AS n FROM attrs"]))))))
+
+(deftest coerced-values-findable-test
+  (let [u "hyperphor://okc/event/e"
+        at #inst "2026-10-31T00:00:00.000-00:00"
+        id (random-uuid)]
+    (t/put u {:status :done :role :user/admin :at at :ref id})
+    (let [obj (t/get u)]
+      (doseq [k [:status :role :at :ref]]
+        (is (= #{"e"} (ids "event" {:attrs {k (get obj k)}})) (str "value from get, " k))))
+    (is (= #{"e"} (ids "event" {:attrs {:status :done :role :user/admin :at at :ref id}}))
+        "original Clojure values too")))
+
+(deftest find-uses-attr-index-test
+  (t/put-many (for [i (range 200)] [(str "hyperphor://okc/post/" i) {:tag (str "t" (mod i 10)) :n i}]))
+  (let [ds    (jdbc/get-datasource {:dbtype "sqlite" :dbname *db-file*})
+        sql   (atom nil)
+        _     (with-redefs [jdbc/execute! (let [f jdbc/execute!]
+                                            (fn [conn q & more] (reset! sql q) (apply f conn q more)))]
+                (is (= 20 (count (t/find "post" {:attrs {:tag "t3"}})))))
+        plan  (map #(some (fn [[k v]] (when (= "detail" (name k)) v)) %)
+                   (jdbc/execute! ds (update @sql 0 #(str "EXPLAIN QUERY PLAN " %))))]
+    (is (some #(re-find #"SEARCH attrs USING INDEX attrs_text" %) plan) (str plan))
+    (is (some #(re-find #"SEARCH objects USING INDEX sqlite_autoindex_objects_1" %) plan)
+        (str "objects looked up by primary key, not walked by type: " plan))))
+
+(deftest backfill-test
+  (t/put "hyperphor://okc/post/old" {:tag "legacy"})
+  (let [ds (jdbc/get-datasource {:dbtype "sqlite" :dbname *db-file*})]
+    (jdbc/execute-one! ds ["DELETE FROM attrs"])
+    (jdbc/execute-one! ds ["PRAGMA user_version = 0"]))
+  (is (empty? (ids "post" {:attrs {:tag "legacy"}})))
+  (t/configure! {:store *db-file*})
+  (is (= #{"old"} (ids "post" {:attrs {:tag "legacy"}}))))

@@ -81,3 +81,29 @@
   ([{:keys [realm counts?]}]
    (let [m (store/types* (the-store) realm)]
      (if counts? m (keys m)))))
+
+;;; Relations: an attribute whose value (or array element) is a hyperphor:// URI is a reference.
+
+(defn refs
+  "Forward references of the object at uri: {attr [uri ...]}."
+  [uri]
+  (->> (get uri)
+       (keep (fn [[k v]]
+               (when-let [us (seq (filter #(and (string? %) (uri/full-uri? %)
+                                                (try (uri/parse-uri %) (catch Exception _ nil)))
+                                          (if (sequential? v) v [v])))]
+                 [k (vec us)])))
+       (into {})))
+
+(defn referrers
+  "Entries (plus :attr) of objects referring to uri, newest first. opts: :attr, :type."
+  ([uri] (referrers uri {}))
+  ([uri opts]
+   (store/referrers* (the-store) uri opts)))
+
+(defn search
+  "Entries whose text attribute values match query, best first, each plus :rank and :snippet.
+  Every word must match as a prefix; opts: :type, :realm, :limit, :raw? (query is FTS5 syntax)."
+  ([query] (search query {}))
+  ([query opts]
+   (store/search* (the-store) query opts)))

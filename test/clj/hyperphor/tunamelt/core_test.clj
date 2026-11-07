@@ -186,3 +186,77 @@
   (is (empty? (ids "post" {:attrs {:tag "legacy"}})))
   (t/configure! {:store *db-file*})
   (is (= #{"old"} (ids "post" {:attrs {:tag "legacy"}}))))
+
+(deftest relations-test
+  (let [page "hyperphor://g/page/eliza"
+        b1   "hyperphor://g/block/1"
+        b2   "hyperphor://g/block/2"]
+    (t/put page {:name "ELIZA"})
+    (t/put b1 {:content "about [[ELIZA]]" :page "hyperphor://g/page/weizenbaum" :refs [page]})
+    (t/put b2 {:content "child" :parent b1 :refs [page "hyperphor://g/page/other"]})
+    (is (= {:page ["hyperphor://g/page/weizenbaum"] :refs [page]} (t/refs b1)))
+    (is (= {:parent [b1] :refs [page "hyperphor://g/page/other"]} (t/refs b2)))
+    (is (= #{[b1 :refs] [b2 :refs]} (set (map (juxt :uri :attr) (t/referrers page)))))
+    (is (= [b2] (map :uri (t/referrers b1 {:attr :parent}))))
+    (is (empty? (t/referrers b1 {:attr :refs})))
+    (is (empty? (t/referrers page {:type "page"})))
+    (let [ds   (jdbc/get-datasource {:dbtype "sqlite" :dbname *db-file*})
+          plan (map #(some (fn [[k v]] (when (= "detail" (name k)) v)) %)
+                    (jdbc/execute! ds ["EXPLAIN QUERY PLAN SELECT o.*, a.attr FROM attrs a
+                                         JOIN objects o ON o.realm=a.realm AND o.type=a.type AND o.id=a.id
+                                         WHERE a.v_text=? ORDER BY o.updated DESC" page]))]
+      (is (some #(re-find #"SEARCH a USING INDEX attrs_value" %) plan) (str plan)))))
+
+(defn- hits [q & [opts]] (set (map (comp :id :meta) (t/search q opts))))
+
+(deftest search-test
+  (t/put "hyperphor://g/block/1" {:content "Heideggerian AI, per Dreyfus" :page "hyperphor://g/page/ai"})
+  (t/put "hyperphor://g/block/2" {:content "Café notes on Heidegger" :tags ["phenomenology"]})
+  (t/put "hyperphor://g/page/ai" {:name "AI winter"})
+  (t/put "hyperphor://h/block/3" {:content "unrelated" :n 3})
+  (is (= #{"1" "2"} (hits "heidegger")) "prefix match, case-insensitive")
+  (is (= #{"1"} (hits "heidegger dreyfus")) "all words required")
+  (is (= #{"2"} (hits "cafe")) "diacritics folded")
+  (is (= #{"2"} (hits "phenomenology")) "array elements indexed")
+  (is (empty? (hits "hyperphor")) "URI values not indexed")
+  (is (= #{"ai" "1"} (hits "ai")))
+  (is (= #{"ai"} (hits "ai" {:type "page"})))
+  (is (= #{"3"} (hits "unrelated" {:realm "h"})))
+  (is (empty? (hits "unrelated" {:realm "g"})))
+  (is (= 1 (count (t/search "ai" {:limit 1}))))
+  (let [r (first (t/search "dreyfus"))]
+    (is (= "hyperphor://g/block/1" (:uri r)))
+    (is (= "Heideggerian AI, per «Dreyfus»" (:snippet r)))
+    (is (number? (:rank r))))
+  (testing "awkward input"
+    (is (= [] (t/search "  ")))
+    (is (empty? (hits "C++ don't -x \"q")))
+    (is (= (hits "heidegger") (hits "heidegger / —")) "punctuation-only words ignored")
+    (is (= [] (t/search "- /")))
+    (is (= #{"2"} (hits "heidegger NOT dreyfus" {:raw? true})))
+    (is (thrown? clojure.lang.ExceptionInfo (t/search "\"unclosed" {:raw? true})))))
+
+(deftest search-tracks-writes-test
+  (t/put "hyperphor://g/note/a" {:text "alpha"})
+  (t/put "hyperphor://g/note/a" {:text "beta"})
+  (is (empty? (hits "alpha")) "re-put replaces old text")
+  (is (= #{"a"} (hits "beta")))
+  (t/delete "hyperphor://g/note/a")
+  (is (empty? (hits "beta")))
+  (t/put "hyperphor://g/log/l" {:text "first"} {:mode :append-only})
+  (t/put "hyperphor://g/log/l" {:text "second"})
+  (is (empty? (hits "first")) "append-only: latest revision only")
+  (is (= #{"l"} (hits "second")))
+  (t/put "hyperphor://g/note/b" {:text "gamma"})
+  (t/put "hyperphor://g/note/b" {:n 1})
+  (is (empty? (hits "gamma")) "object with no text drops out"))
+
+(deftest search-backfill-test
+  (t/put "hyperphor://okc/post/old" {:text "legacy words"})
+  (let [ds (jdbc/get-datasource {:dbtype "sqlite" :dbname *db-file*})]
+    ;; Simulate a schema-version 1 database: no full-text tables.
+    (jdbc/execute-one! ds ["DROP TABLE fts"])
+    (jdbc/execute-one! ds ["DROP TABLE fts_keys"])
+    (jdbc/execute-one! ds ["PRAGMA user_version = 1"]))
+  (t/configure! {:store *db-file*})
+  (is (= #{"old"} (hits "legacy"))))

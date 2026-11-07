@@ -15,4 +15,9 @@
   (history* [store k]
     "Return revisions of k, newest first, as {:key :obj :meta}.")
   (types* [store realm]
-    "Return {type count} for all stored types, optionally limited to realm."))
+    "Return {type count} for all stored types, optionally limited to realm.")
+  (referrers* [store uri opts]
+    "Return entries (plus :attr) whose attributes hold uri. opts: :attr, :type.")
+  (search* [store query opts]
+    "Return entries (plus :rank, :snippet) whose text matches query, best first.
+    opts: :type, :realm, :limit, :raw?."))

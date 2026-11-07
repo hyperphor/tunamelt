@@ -1,6 +1,6 @@
 (ns hyperphor.tunamelt.sqlite
   "SQLite backend. Objects are JSON text (source of truth for get); top-level attributes are
-  also indexed in an attrs table for find."
+  also indexed in an attrs table for find, and their text in an FTS5 table for search."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [next.jdbc :as jdbc]
@@ -53,9 +53,16 @@
    "CREATE INDEX IF NOT EXISTS attrs_key ON attrs (realm, type, id)"
    "CREATE INDEX IF NOT EXISTS attrs_text ON attrs (type, attr, v_text)"
    "CREATE INDEX IF NOT EXISTS attrs_num ON attrs (type, attr, v_num)"
-   "CREATE INDEX IF NOT EXISTS attrs_bool ON attrs (type, attr, v_bool)"])
+   "CREATE INDEX IF NOT EXISTS attrs_bool ON attrs (type, attr, v_bool)"
+   "CREATE INDEX IF NOT EXISTS attrs_value ON attrs (v_text, attr)"
+   ;; Derived full-text index: one row per object, rowid = fts_keys.k (stable across VACUUM).
+   "CREATE TABLE IF NOT EXISTS fts_keys (
+      k INTEGER PRIMARY KEY, realm TEXT NOT NULL, type TEXT NOT NULL, id TEXT NOT NULL,
+      UNIQUE (realm, type, id))"
+   "CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
+      text, tokenize = 'unicode61 remove_diacritics 2', prefix = '2 3')"])
 
-(def ^:private schema-version 1)
+(def ^:private schema-version 2)
 
 (def ^:private rs-opts {:builder-fn rs/as-unqualified-lower-maps})
 
@@ -106,12 +113,38 @@
        (when (= col "v_num") val)
        (when (= col "v_bool") val)])))
 
+(defn- unindex-text! [conn k]
+  (when-let [{fk :k} (jdbc/execute-one! conn (into ["SELECT k FROM fts_keys WHERE realm=? AND type=? AND id=?"]
+                                                   (key-params k))
+                                        rs-opts)]
+    (jdbc/execute-one! conn ["DELETE FROM fts WHERE rowid=?" fk])
+    (jdbc/execute-one! conn ["DELETE FROM fts_keys WHERE k=?" fk])))
+
+(defn- index-text!
+  "Index the object's text attribute values (minus hyperphor:// URIs) for search."
+  [conn k rows]
+  (unindex-text! conn k)
+  (when-let [texts (seq (remove #(str/starts-with? % (str uri/scheme "://")) (keep second rows)))]
+    (let [{fk :k} (jdbc/execute-one! conn (into ["INSERT INTO fts_keys (realm,type,id) VALUES (?,?,?) RETURNING k"]
+                                                (key-params k))
+                                     rs-opts)]
+      (jdbc/execute-one! conn ["INSERT INTO fts (rowid, text) VALUES (?,?)" fk (str/join "\n" texts)]))))
+
 (defn- index-attrs! [conn k json-obj]
   (jdbc/execute-one! conn (into ["DELETE FROM attrs WHERE realm=? AND type=? AND id=?"] (key-params k)))
-  (when-let [rows (seq (attr-rows json-obj))]
-    (jdbc/execute-batch! conn "INSERT INTO attrs (realm,type,id,attr,v_text,v_num,v_bool) VALUES (?,?,?,?,?,?,?)"
-                         (map #(into (key-params k) %) rows)
-                         {})))
+  (let [rows (attr-rows json-obj)]
+    (when (seq rows)
+      (jdbc/execute-batch! conn "INSERT INTO attrs (realm,type,id,attr,v_text,v_num,v_bool) VALUES (?,?,?,?,?,?,?)"
+                           (map #(into (key-params k) %) rows)
+                           {}))
+    (index-text! conn k rows)))
+
+(defn- fts-query
+  "FTS5 MATCH expression requiring every word of q as a prefix; nil if q has no words."
+  [q]
+  (some->> (re-seq #"\S+" (str q))
+           (map #(str "\"" (str/replace % "\"" "\"\"") "\"*"))
+           (str/join " ")))
 
 (defn- put-one [conn k obj {:keys [mode]}]
   (let [existing (get-row conn k)
@@ -199,6 +232,7 @@
                                   (key-params k)))
       (jdbc/execute-one! tx (into ["DELETE FROM attrs WHERE realm=? AND type=? AND id=?"]
                                   (key-params k)))
+      (unindex-text! tx k)
       (pos? (:next.jdbc/update-count
              (jdbc/execute-one! tx (into ["DELETE FROM objects WHERE realm=? AND type=? AND id=?"]
                                          (key-params k))))))))
@@ -213,6 +247,37 @@
                              rs-opts))
         [(row->entry current)])))
 
+  (referrers* [_ uri {:keys [attr type]}]
+    (mapv #(assoc (row->entry %) :attr (keyword (:attr %)))
+          (jdbc/execute! ds (into [(str "SELECT o.*, a.attr FROM attrs a
+                                         JOIN objects o ON o.realm=a.realm AND o.type=a.type AND o.id=a.id
+                                         WHERE a.v_text=?"
+                                        (when attr " AND a.attr=?")
+                                        (when type " AND a.type=?")
+                                        " ORDER BY o.updated DESC")]
+                                  (cond-> [uri] attr (conj (kstr attr)) type (conj (name type))))
+                         rs-opts)))
+
+  (search* [_ query {:keys [type realm limit raw?]}]
+    (if-let [q (if raw? (not-empty (str/trim (str query))) (fts-query query))]
+      (try
+        (mapv #(assoc (row->entry %) :rank (:rank %) :snippet (:snippet %))
+              (jdbc/execute! ds (into [(str "SELECT o.*, fts.rank AS rank,
+                                                    snippet(fts, 0, '«', '»', '…', 16) AS snippet
+                                             FROM fts
+                                             JOIN fts_keys k ON k.k = fts.rowid
+                                             JOIN objects o ON o.realm=k.realm AND o.type=k.type AND o.id=k.id
+                                             WHERE fts MATCH ?"
+                                            (when type " AND o.type=?")
+                                            (when realm " AND o.realm=?")
+                                            " ORDER BY fts.rank"
+                                            (when limit (str " LIMIT " (long limit))))]
+                                      (cond-> [q] type (conj (name type)) realm (conj realm)))
+                             rs-opts))
+        (catch java.sql.SQLException e
+          (throw (ex-info (str "Bad search query: " (ex-message e)) {:query query :match q} e))))
+      []))
+
   (types* [_ realm]
     (into (sorted-map)
           (map (juxt :type :n))
@@ -222,9 +287,10 @@
                          rs-opts))))
 
 (defn reindex!
-  "Rebuild the attrs index from stored objects."
+  "Rebuild the attrs and full-text indexes from stored objects."
   [conn]
-  (jdbc/execute-one! conn ["DELETE FROM attrs"])
+  (doseq [t ["attrs" "fts" "fts_keys"]]
+    (jdbc/execute-one! conn [(str "DELETE FROM " t)]))
   (doseq [{:keys [realm type id obj]} (jdbc/execute! conn ["SELECT realm,type,id,obj FROM objects"] rs-opts)]
     (index-attrs! conn {:realm realm :type type :id id} (<-json obj))))
 
@@ -235,7 +301,7 @@
     (jdbc/execute-one! ds ["PRAGMA journal_mode=WAL"])
     (jdbc/with-transaction [tx ds]
       (doseq [stmt ddl] (jdbc/execute-one! tx [stmt]))
-      ;; Databases from before the attrs table need it backfilled.
+      ;; Databases from before the current derived indexes need them backfilled.
       (when (< (:user_version (jdbc/execute-one! tx ["PRAGMA user_version"] rs-opts)) schema-version)
         (reindex! tx)
         (jdbc/execute-one! tx [(str "PRAGMA user_version = " schema-version)])))

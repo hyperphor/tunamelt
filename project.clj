@@ -12,6 +12,6 @@
                  [org.clojure/data.json "2.5.2"]
                  [com.github.seancorfield/next.jdbc "1.3.1048"]
                  [org.xerial/sqlite-jdbc "3.46.1.3"]]
-  :source-paths ["src/clj"]
+  :source-paths ["src/clj" "src/cljc" "src/cljs"]
   :test-paths ["test/clj"]
   :jvm-opts ["--enable-native-access=ALL-UNNAMED"])

@@ -70,6 +70,24 @@ throw. `:type`/`:realm` filters apply after the text match.
 
 | Backend | type/realm/time filters | `:attrs` filter | `search` |
 |---|---|---|---|
-| SQLite (default) | indexed | indexed (`attrs` table) | FTS5 (`fts` table); type/realm filtered after match |
+| SQLite (JVM default) | indexed | indexed (`attrs` table) | FTS5 (`fts` table); type/realm filtered after match |
+| IndexedDB (cljs default) | indexed (`type`/`realm`/`updated` compound indexes) | first positive attr narrows via the `attrs` index; remaining filters checked in memory | word-prefix lookups on a multiEntry token index, intersected; rank = number of matching words; `:raw?` unsupported |
 
 The `hyperphor.tunamelt.store/Store` protocol is the extension point for other backends.
+
+## ClojureScript
+
+The same API, on IndexedDB, for browsers and extension service workers. Every function returns
+a Promise; objects are stored as the same JSON as on the JVM, so round-trip semantics match.
+
+```clojure
+(require '[hyperphor.tunamelt.core :as t])
+
+(t/configure! {:store "my-db" :realm "okc"})   ; IndexedDB database name (default "tunamelt")
+(-> (t/put "hyperphor://okc/prompt/summarize" {:text "Summarize: {{doc}}"})
+    (.then #(t/find "prompt" {:attrs {:text "Summarize: {{doc}}"}})))
+```
+
+`types` scans every object. `search` supports the default word-prefix syntax only: words are
+split on non-alphanumerics, lowercased, and diacritic-folded, and every word must match.
+Tests run under node against `fake-indexeddb`: `npm install && npx shadow-cljs compile test`.

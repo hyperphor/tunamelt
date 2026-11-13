@@ -1,0 +1,12 @@
+{
+  "name": "tunamelt",
+  "private": true,
+  "description": "ClojureScript build and tests for tunamelt (the JVM side uses Leiningen).",
+  "scripts": {
+    "test:cljs": "shadow-cljs compile test"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0",
+    "shadow-cljs": "^3.5.14"
+  }
+}

@@ -1,0 +1,7 @@
+;; ClojureScript tests run under node against fake-indexeddb.
+{:source-paths ["src/cljc" "src/cljs" "test/cljs"]
+ :builds
+ {:test {:target    :node-test
+         :output-to "out/test.js"
+         :ns-regexp "-test$"
+         :autorun   true}}}

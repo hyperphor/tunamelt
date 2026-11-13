@@ -1,5 +1,6 @@
 (ns hyperphor.tunamelt.store
-  "Storage backend protocol. Keys are {:realm :type :id} maps.")
+  "Storage backend protocol. Keys are {:realm :type :id} maps.
+  In cljs every method returns a Promise of the documented value.")
 
 (defprotocol Store
   (put* [store k obj opts]

@@ -1,27 +1,14 @@
 (ns hyperphor.tunamelt.sqlite
   "SQLite backend. Objects are JSON text (source of truth for get); top-level attributes are
   also indexed in an attrs table for find, and their text in an FTS5 table for search."
-  (:require [clojure.data.json :as json]
-            [clojure.string :as str]
+  (:require [clojure.string :as str]
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
+            [hyperphor.tunamelt.codec :refer [kstr ->json <-json roundtrip]]
             [hyperphor.tunamelt.store :as store]
             [hyperphor.tunamelt.uri :as uri]))
 
-;;; JSON encoding. Keyword keys and values keep their namespace ("block/uuid");
-;;; on read, keys come back as keywords, values as strings.
-
-(defn- kstr [k] (if (keyword? k) (subs (str k) 1) (str k)))
-
-(defn- jsonable [x]
-  (cond (map? x)     (into {} (map (fn [[k v]] [(kstr k) (jsonable v)])) x)
-        (keyword? x) (kstr x)
-        (uuid? x)    (str x)
-        (coll? x)    (mapv jsonable x)
-        :else        x))
-
-(defn- ->json [obj] (json/write-str (jsonable obj)))
-(defn- <-json [s] (json/read-str s :key-fn keyword))
+;;; JSON encoding lives in codec (shared with the cljs backends).
 
 (defn- now [] (System/currentTimeMillis))
 
@@ -85,11 +72,6 @@
 
 ;;; Attribute index. Rows are built from the JSON round-trip of the object (what get returns),
 ;;; so values read back from get always match in find.
-
-(defn- roundtrip
-  "v as it would come back from get (keywords, uuids, insts → strings)."
-  [v]
-  (:v (<-json (->json {:v v}))))
 
 (defn- value-col
   "[column value] for a round-tripped scalar, or nil if not indexable."
